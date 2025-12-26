@@ -448,7 +448,21 @@ class HuggingFaceBackend(BackendBase):
             # Aplica LoRA ao modelo
             model = get_peft_model(model, peft_config)
             
-            self._logger.info("LoRA aplicado com sucesso")
+            # Garante que o modelo está em modo de treinamento
+            model.train()
+            
+            # Verifica se há parâmetros treináveis
+            trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
+            if len(trainable_params) == 0:
+                self._logger.warning(
+                    "Nenhum parâmetro treinável encontrado após aplicar LoRA. "
+                    "Isso pode indicar um problema com a configuração do modelo."
+                )
+            else:
+                self._logger.info(
+                    "LoRA aplicado com sucesso",
+                    trainable_params=len(trainable_params)
+                )
             
             # Imprime estatísticas do modelo
             model.print_trainable_parameters()
@@ -737,6 +751,78 @@ class HuggingFaceBackend(BackendBase):
         )
         
         self._training_args = training_args
+        
+        # Garante que o modelo está em modo de treinamento
+        # Isso é crítico para que os gradientes sejam calculados
+        import torch
+        model.train()
+        
+        # Verifica e habilita requires_grad para parâmetros treináveis
+        # Quando usando LoRA/PEFT, apenas alguns parâmetros devem ter requires_grad=True
+        # Mas precisamos garantir que pelo menos alguns parâmetros estejam treináveis
+        trainable_params = []
+        total_params = 0
+        for name, param in model.named_parameters():
+            total_params += 1
+            if param.requires_grad:
+                trainable_params.append(name)
+        
+        # Verifica se é modelo PEFT/LoRA
+        is_peft_model = hasattr(model, "peft_config") or hasattr(model, "get_peft_model")
+        
+        if len(trainable_params) == 0:
+            # Se nenhum parâmetro está treinável, isso é um problema
+            self._logger.warning(
+                "Nenhum parâmetro está treinável! Tentando corrigir..."
+            )
+            
+            if is_peft_model:
+                # Modelo PEFT - os parâmetros LoRA devem estar treináveis
+                # PEFT deve configurar isso automaticamente, mas vamos verificar
+                try:
+                    # Tenta habilitar requires_grad para parâmetros LoRA
+                    for name, param in model.named_parameters():
+                        if "lora" in name.lower():
+                            param.requires_grad = True
+                            trainable_params.append(name)
+                            self._logger.info(f"Habilitando gradientes para parâmetro LoRA: {name}")
+                    
+                    # Se ainda não encontrou, tenta usar enable_input_require_grads
+                    if len(trainable_params) == 0 and hasattr(model, "enable_input_require_grads"):
+                        model.enable_input_require_grads()
+                        self._logger.info("Habilitando requires_grad para inputs do modelo PEFT")
+                        
+                        # Verifica novamente
+                        for name, param in model.named_parameters():
+                            if param.requires_grad:
+                                trainable_params.append(name)
+                except Exception as e:
+                    self._logger.warning(
+                        f"Erro ao configurar gradientes para modelo PEFT: {e}"
+                    )
+            else:
+                # Modelo normal - todos os parâmetros devem estar treináveis
+                for name, param in model.named_parameters():
+                    param.requires_grad = True
+                    trainable_params.append(name)
+                self._logger.info("Habilitando gradientes para todos os parâmetros")
+        
+        # Verifica se há pelo menos alguns parâmetros treináveis
+        if len(trainable_params) == 0:
+            raise BackendError(
+                "Nenhum parâmetro do modelo está configurado para treinamento. "
+                "Verifique se o modelo foi configurado corretamente (LoRA, etc.)",
+                backend_type="huggingface",
+                operation="create_trainer"
+            )
+        
+        self._logger.info(
+            "Modelo configurado para treinamento",
+            trainable_params=len(trainable_params),
+            total_params=total_params,
+            trainable_ratio=f"{len(trainable_params)/total_params*100:.2f}%" if total_params > 0 else "0%",
+            is_peft_model=is_peft_model
+        )
         
         # Função de métricas padrão se não fornecida
         if compute_metrics is None and eval_config:
