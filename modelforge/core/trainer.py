@@ -197,7 +197,21 @@ class ModelTrainer:
             
             # Carrega modelo com otimização de memória (FP16 se configurado)
             use_fp16 = self._config.training.fp16 if self._config.training else None
-            self._model = self._backend.load_model(self._config.model, use_fp16=use_fp16)
+            
+            # IMPORTANTE: Desabilita device_map quando LoRA está habilitado
+            # device_map pode causar problemas com treinamento de modelos LoRA
+            use_device_map = None  # Auto-detect por padrão
+            if self._config.lora and self._config.lora.enabled:
+                use_device_map = False
+                self._logger.info(
+                    "LoRA habilitado: desabilitando device_map para evitar problemas com treinamento"
+                )
+            
+            self._model = self._backend.load_model(
+                self._config.model, 
+                use_fp16=use_fp16,
+                use_device_map=use_device_map
+            )
             
             # Aplica LoRA se configurado
             if self._config.lora and self._config.lora.enabled:

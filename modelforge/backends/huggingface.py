@@ -77,13 +77,19 @@ class HuggingFaceBackend(BackendBase):
                     error=str(e)
                 )
     
-    def load_model(self, config: ModelConfig, use_fp16: Optional[bool] = None) -> Any:
+    def load_model(
+        self, 
+        config: ModelConfig, 
+        use_fp16: Optional[bool] = None,
+        use_device_map: Optional[bool] = None
+    ) -> Any:
         """
         Carrega um modelo do Hugging Face Hub.
         
         Args:
             config: Configuração do modelo
             use_fp16: Se deve carregar o modelo em FP16 (None = auto-detect)
+            use_device_map: Se deve usar device_map (None = auto-detect, False = desabilitado)
             
         Returns:
             Modelo PreTrainedModel
@@ -129,14 +135,26 @@ class HuggingFaceBackend(BackendBase):
                 )
             
             # Configura device_map para carregar diretamente na GPU quando disponível
-            # AVISO: device_map="auto" pode causar problemas com treinamento em alguns casos
-            # Mas é necessário para modelos grandes que não cabem na memória
-            # Vamos usar device_map mas garantir que o modelo está configurado corretamente
-            use_device_map = False
-            if str(device).startswith("cuda") and torch.cuda.is_available():
+            # AVISO: device_map="auto" pode causar problemas com treinamento, especialmente com LoRA
+            # Se use_device_map=False, não usa device_map mesmo que GPU esteja disponível
+            use_device_map_flag = False
+            if use_device_map is False:
+                # Explicitamente desabilitado
+                use_device_map_flag = False
+                self._logger.info("device_map desabilitado explicitamente")
+            elif use_device_map is True:
+                # Explicitamente habilitado
+                if str(device).startswith("cuda") and torch.cuda.is_available():
+                    use_device_map_flag = True
+            else:
+                # Auto-detect: usa device_map se GPU disponível (comportamento padrão)
+                if str(device).startswith("cuda") and torch.cuda.is_available():
+                    use_device_map_flag = True
+            
+            if use_device_map_flag:
                 # Carrega diretamente na GPU usando device_map
                 # Isso é mais eficiente que carregar na CPU e depois mover
-                # NOTA: Pode causar problemas com treinamento, mas vamos corrigir depois
+                # NOTA: Pode causar problemas com treinamento, especialmente com LoRA
                 model_kwargs["device_map"] = "auto"
                 model_kwargs["low_cpu_mem_usage"] = True
                 
@@ -157,15 +175,17 @@ class HuggingFaceBackend(BackendBase):
                         error=str(e)
                     )
                 
-                use_device_map = True
                 self._logger.info(
                     "Carregando modelo diretamente na GPU usando device_map",
                     device_map="auto"
                 )
             else:
-                # CPU ou MPS - não usa device_map
+                # CPU, MPS ou device_map desabilitado - não usa device_map
                 model_kwargs["low_cpu_mem_usage"] = True
-                self._logger.info("Carregando modelo na CPU/MPS")
+                if not str(device).startswith("cuda") or not torch.cuda.is_available():
+                    self._logger.info("Carregando modelo na CPU/MPS")
+                else:
+                    self._logger.info("Carregando modelo na GPU sem device_map")
             
             # Seleciona a classe de modelo baseado na tarefa
             if config.task == "text-generation" or config.task == "causal-lm":
@@ -183,12 +203,12 @@ class HuggingFaceBackend(BackendBase):
                 model = AutoModel.from_pretrained(**model_kwargs)
             
             # Se não usou device_map, move para o dispositivo explicitamente
-            if not use_device_map:
+            if not use_device_map_flag:
                 model = model.to(device)
             
             # Verifica se está realmente na GPU (quando usando device_map, verifica de forma diferente)
             if str(device).startswith("cuda"):
-                if use_device_map:
+                if use_device_map_flag:
                     # Quando usando device_map, verifica através do hf_device_map
                     if hasattr(model, "hf_device_map"):
                         device_map_info = model.hf_device_map
@@ -437,6 +457,60 @@ class HuggingFaceBackend(BackendBase):
         
         try:
             from peft import LoraConfig, get_peft_model, TaskType
+            import torch
+            
+            # IMPORTANTE: Consolida o modelo em um único dispositivo antes de aplicar LoRA
+            # device_map pode causar problemas com LoRA durante treinamento
+            device = self.get_device()
+            
+            # Verifica se o modelo está usando device_map
+            has_device_map = hasattr(model, "hf_device_map")
+            
+            if has_device_map:
+                self._logger.warning(
+                    "Modelo está usando device_map. Consolidando em um único dispositivo "
+                    "antes de aplicar LoRA para evitar problemas com treinamento..."
+                )
+                try:
+                    # Para modelos com device_map, precisamos desabilitar o device_map
+                    # e mover todos os parâmetros para um único dispositivo
+                    # Primeiro, tenta desabilitar o device_map através do accelerate
+                    try:
+                        from accelerate import dispatch_model, infer_auto_device_map
+                        from accelerate.utils import get_balanced_memory
+                        
+                        # Tenta obter o modelo base se for um modelo wrapped
+                        base_model = model
+                        if hasattr(model, "base_model"):
+                            base_model = model.base_model
+                        elif hasattr(model, "model"):
+                            base_model = model.model
+                        
+                        # Move todos os parâmetros para o dispositivo
+                        for param in base_model.parameters():
+                            if param.device != device:
+                                param.data = param.data.to(device)
+                        
+                        # Remove device_map se existir
+                        if hasattr(model, "hf_device_map"):
+                            delattr(model, "hf_device_map")
+                        
+                        self._logger.info(
+                            "Modelo consolidado em um único dispositivo",
+                            device=str(device)
+                        )
+                    except ImportError:
+                        # Se accelerate não estiver disponível, tenta método simples
+                        self._logger.info("Accelerate não disponível, usando método simples")
+                        model = model.to(device)
+                        if hasattr(model, "hf_device_map"):
+                            delattr(model, "hf_device_map")
+                        self._logger.info("Modelo movido para dispositivo", device=str(device))
+                except Exception as e:
+                    self._logger.warning(
+                        f"Erro ao consolidar modelo: {e}. "
+                        "Continuando, mas pode haver problemas com treinamento..."
+                    )
             
             self._logger.info(
                 "Aplicando LoRA ao modelo",
