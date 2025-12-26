@@ -556,6 +556,18 @@ class HuggingFaceBackend(BackendBase):
             # IMPORTANTE: Garante que o modelo está em modo de treinamento
             model.train()
             
+            # IMPORTANTE: Para modelos PEFT, precisamos chamar enable_input_require_grads()
+            # para garantir compatibilidade com gradient_checkpointing.
+            # Isso faz com que os embeddings (saídas da camada de embedding) tenham
+            # requires_grad=True, o que é necessário para que gradient_checkpointing funcione.
+            # Chamamos isso cedo, independente de gradient_checkpointing estar ativo,
+            # pois não causa problemas e previne erros caso seja habilitado depois.
+            if hasattr(model, "enable_input_require_grads"):
+                model.enable_input_require_grads()
+                self._logger.debug(
+                    "enable_input_require_grads() chamado para compatibilidade com gradient_checkpointing"
+                )
+            
             # IMPORTANTE: Move o modelo para o dispositivo correto após aplicar LoRA
             # Isso garante que todos os parâmetros (incluindo LoRA) estão no device correto
             try:
@@ -992,6 +1004,19 @@ class HuggingFaceBackend(BackendBase):
         # Mas precisamos garantir que pelo menos alguns parâmetros estejam treináveis
         trainable_params = trainable_params_after
         total_params = sum(1 for _ in model.named_parameters())
+        
+        # IMPORTANTE: Para modelos PEFT com gradient_checkpointing, precisamos SEMPRE chamar
+        # enable_input_require_grads() para que os embeddings tenham requires_grad=True.
+        # Isso é necessário porque gradient_checkpointing precisa que as entradas das camadas
+        # internas tenham gradientes para funcionar corretamente.
+        # Sem isso, ocorre o erro: "None of the inputs have requires_grad=True"
+        if is_peft_model and training_config.gradient_checkpointing:
+            if hasattr(model, "enable_input_require_grads"):
+                model.enable_input_require_grads()
+                self._logger.info(
+                    "enable_input_require_grads() chamado para compatibilidade "
+                    "LoRA + gradient_checkpointing"
+                )
         
         if len(trainable_params) == 0:
             # Se nenhum parâmetro está treinável, isso é um problema

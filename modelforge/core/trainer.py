@@ -283,6 +283,18 @@ class ModelTrainer:
             # que os parâmetros têm requires_grad=True
             if self._config.training.gradient_checkpointing:
                 if hasattr(self._model, "gradient_checkpointing_enable"):
+                    # IMPORTANTE: Para modelos PEFT com gradient_checkpointing, precisamos
+                    # chamar enable_input_require_grads() ANTES de habilitar gradient_checkpointing.
+                    # Isso faz com que os embeddings tenham requires_grad=True, que é necessário
+                    # para que gradient_checkpointing funcione (evita o erro:
+                    # "None of the inputs have requires_grad=True")
+                    if is_peft_model and hasattr(self._model, "enable_input_require_grads"):
+                        self._model.enable_input_require_grads()
+                        self._logger.info(
+                            "enable_input_require_grads() chamado para compatibilidade "
+                            "LoRA + gradient_checkpointing"
+                        )
+                    
                     # Para modelos PEFT, precisamos garantir que o modelo base também
                     # está configurado corretamente para gradient checkpointing
                     if is_peft_model and hasattr(self._model, "base_model"):
