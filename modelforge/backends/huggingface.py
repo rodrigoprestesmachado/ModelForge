@@ -566,7 +566,8 @@ class HuggingFaceBackend(BackendBase):
         self,
         dataset: Any,
         tokenizer: Any,
-        config: DatasetConfig
+        config: DatasetConfig,
+        model_task: Optional[str] = None
     ) -> Any:
         """
         Prepara o dataset aplicando tokenização.
@@ -575,6 +576,7 @@ class HuggingFaceBackend(BackendBase):
             dataset: Dataset bruto
             tokenizer: Tokenizer para processar
             config: Configuração do dataset
+            model_task: Tarefa do modelo (text-generation, text-classification, etc.)
             
         Returns:
             Dataset processado
@@ -585,6 +587,13 @@ class HuggingFaceBackend(BackendBase):
         label_column = config.columns.label
         text_pair_column = config.columns.text_pair
         max_length = config.preprocessing.max_length
+        
+        # Detecta se é uma tarefa de geração de texto (causal LM)
+        is_causal_lm = model_task in ["text-generation", "causal-lm"] or (
+            model_task is None and hasattr(self, "_model") and 
+            hasattr(self._model, "config") and
+            getattr(self._model.config, "model_type", None) in ["gemma", "llama", "gpt2"]
+        )
         
         def tokenize_function(examples: Dict[str, List]) -> Dict[str, Any]:
             """Função de tokenização para map."""
@@ -614,8 +623,44 @@ class HuggingFaceBackend(BackendBase):
             ] if label_column else None
         )
         
-        # Renomeia coluna de label se necessário
-        if label_column and label_column != "labels":
+        # Para modelos de causal LM (text-generation), cria labels a partir dos input_ids
+        # se não houver uma coluna de label explícita
+        if is_causal_lm and not label_column:
+            def create_labels(examples: Dict[str, List]) -> Dict[str, Any]:
+                """Cria labels para causal language modeling."""
+                labels = []
+                input_ids_list = examples["input_ids"]
+                attention_mask_list = examples["attention_mask"]
+                
+                for input_ids, attention_mask in zip(input_ids_list, attention_mask_list):
+                    # Converte para lista se necessário e copia
+                    if isinstance(input_ids, list):
+                        label = input_ids.copy()
+                    else:
+                        # Se for tensor ou array, converte para lista
+                        label = list(input_ids)
+                    
+                    # Converte attention_mask para lista se necessário
+                    if not isinstance(attention_mask, list):
+                        attention_mask = list(attention_mask)
+                    
+                    # Define -100 para tokens de padding (ignorados no cálculo da loss)
+                    # -100 é o valor padrão usado pelo PyTorch para ignorar tokens
+                    for i, mask in enumerate(attention_mask):
+                        if mask == 0:
+                            label[i] = -100
+                    
+                    labels.append(label)
+                return {"labels": labels}
+            
+            tokenized_dataset = tokenized_dataset.map(
+                create_labels,
+                batched=True,
+                desc="Criando labels para causal LM"
+            )
+            self._logger.info("Labels criados para causal language modeling")
+        elif label_column and label_column != "labels":
+            # Renomeia coluna de label se necessário
             tokenized_dataset = tokenized_dataset.rename_column(label_column, "labels")
         
         # Define formato para PyTorch

@@ -238,11 +238,12 @@ class ModelTrainer:
             # Carrega dataset
             dataset = self._backend.load_dataset(self._config.dataset)
             
-            # Prepara dataset
+            # Prepara dataset (passa a task do modelo para criar labels corretamente)
             processed_dataset = self._backend.prepare_dataset(
                 dataset,
                 self._tokenizer,
-                self._config.dataset
+                self._config.dataset,
+                model_task=self._config.model.task
             )
             
             # Separa splits

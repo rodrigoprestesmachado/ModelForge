@@ -122,7 +122,8 @@ class BackendBase(ABC):
         self,
         dataset: Any,
         tokenizer: Any,
-        config: DatasetConfig
+        config: DatasetConfig,
+        model_task: Optional[str] = None
     ) -> Any:
         """
         Prepara o dataset para treinamento.
@@ -133,6 +134,7 @@ class BackendBase(ABC):
             dataset: Dataset bruto
             tokenizer: Tokenizer para processar textos
             config: Configuração do dataset
+            model_task: Tarefa do modelo (text-generation, text-classification, etc.)
             
         Returns:
             Dataset processado
