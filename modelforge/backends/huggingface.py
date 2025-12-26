@@ -228,6 +228,136 @@ class HuggingFaceBackend(BackendBase):
                 original_exception=e
             )
     
+    def _detect_target_modules(self, model: Any) -> List[str]:
+        """
+        Detecta automaticamente os módulos alvo para LoRA baseado na arquitetura do modelo.
+        
+        Args:
+            model: Modelo a ser analisado
+            
+        Returns:
+            Lista de nomes de módulos alvo
+        """
+        # Obtém a arquitetura do modelo
+        model_type = getattr(model.config, "model_type", None) if hasattr(model, "config") else None
+        
+        # Tenta obter o nome do modelo do config para detecção adicional
+        model_name = None
+        if hasattr(model, "config") and hasattr(model.config, "name_or_path"):
+            model_name = model.config.name_or_path
+        elif hasattr(model, "name_or_path"):
+            model_name = model.name_or_path
+        
+        # Padrões comuns de módulos para diferentes arquiteturas
+        module_patterns = {
+            "gemma": ["q_proj", "k_proj", "v_proj", "o_proj"],
+            "llama": ["q_proj", "k_proj", "v_proj", "o_proj"],
+            "mistral": ["q_proj", "k_proj", "v_proj", "o_proj"],
+            "phi": ["q_proj", "k_proj", "v_proj", "dense"],
+            "gpt2": ["c_attn", "c_proj"],
+            "gpt_neox": ["query_key_value", "dense"],
+            "opt": ["q_proj", "k_proj", "v_proj", "out_proj"],
+            "bloom": ["query_key_value", "dense_h_to_4h", "dense_4h_to_h"],
+            "bert": ["query", "key", "value", "dense"],
+            "roberta": ["query", "key", "value", "dense"],
+        }
+        
+        # Verifica se o nome do modelo contém "gemma" (para Gemma 3 ou outras variantes)
+        if model_name and "gemma" in model_name.lower():
+            target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+            self._logger.info(
+                "Módulos LoRA detectados por nome do modelo (Gemma)",
+                model_name=model_name,
+                target_modules=target_modules
+            )
+            return target_modules
+        
+        # Tenta usar padrão específico da arquitetura
+        if model_type and model_type.lower() in module_patterns:
+            target_modules = module_patterns[model_type.lower()]
+            self._logger.info(
+                "Módulos LoRA detectados por arquitetura",
+                model_type=model_type,
+                target_modules=target_modules
+            )
+            return target_modules
+        
+        # Se não encontrou padrão específico, tenta detectar automaticamente
+        # Procura por módulos comuns de attention
+        all_module_names = [name for name, _ in model.named_modules()]
+        
+        # Para modelos com language_model (como Gemma 3 IT), procura dentro do language_model
+        language_model_modules = [
+            name for name in all_module_names
+            if "language_model" in name
+        ]
+        
+        # Padrões de busca para módulos de attention
+        attention_patterns = [
+            "q_proj", "k_proj", "v_proj", "o_proj",  # LLaMA, Gemma, Mistral
+            "query", "key", "value", "dense",  # BERT, RoBERTa
+            "c_attn", "c_proj",  # GPT-2
+            "query_key_value",  # GPT-NeoX, Bloom
+            "out_proj",  # OPT
+        ]
+        
+        # Encontra módulos que correspondem aos padrões
+        # Usa apenas os nomes finais dos módulos (ex: "q_proj" em vez de "model.language_model.layers.0.q_proj")
+        found_module_patterns = set()
+        found_modules = []
+        
+        for pattern in attention_patterns:
+            for module_name in all_module_names:
+                # Para modelos com language_model, prioriza módulos dentro do language_model
+                if language_model_modules:
+                    if pattern in module_name and "language_model" in module_name:
+                        # Adiciona o padrão (nome final) em vez do nome completo
+                        if pattern not in found_module_patterns:
+                            found_module_patterns.add(pattern)
+                            found_modules.append(pattern)
+                else:
+                    # Se não tem language_model, usa qualquer módulo que corresponda
+                    if pattern in module_name:
+                        if pattern not in found_module_patterns:
+                            found_module_patterns.add(pattern)
+                            found_modules.append(pattern)
+        
+        # Se encontrou módulos, retorna
+        if found_modules:
+            self._logger.info(
+                "Módulos LoRA detectados automaticamente",
+                target_modules=found_modules
+            )
+            return found_modules
+        
+        # Fallback: tenta usar todos os módulos lineares
+        linear_modules = []
+        for name, module in model.named_modules():
+            if hasattr(module, "weight") and len(module.weight.shape) == 2:
+                # É uma camada linear
+                linear_modules.append(name)
+        
+        if linear_modules:
+            # Limita a módulos de attention (geralmente contêm "attn" ou "attention")
+            attention_linear = [
+                name for name in linear_modules
+                if "attn" in name.lower() or "attention" in name.lower()
+            ]
+            if attention_linear:
+                self._logger.info(
+                    "Módulos LoRA detectados (camadas lineares de attention)",
+                    target_modules=attention_linear[:8]  # Limita a 8 módulos
+                )
+                return attention_linear[:8]
+        
+        # Último fallback: módulos padrão para modelos transformer
+        default_modules = ["q_proj", "v_proj"]
+        self._logger.warning(
+            "Não foi possível detectar módulos automaticamente, usando padrão",
+            target_modules=default_modules
+        )
+        return default_modules
+    
     def apply_lora(
         self,
         model: Any,
@@ -268,11 +398,20 @@ class HuggingFaceBackend(BackendBase):
                     f"Task type '{task_type_str}' não reconhecido, usando CAUSAL_LM"
                 )
             
+            # Detecta target_modules se não especificado
+            target_modules = lora_config.target_modules
+            if target_modules is None or (isinstance(target_modules, list) and len(target_modules) == 0):
+                target_modules = self._detect_target_modules(model)
+                self._logger.info(
+                    "target_modules detectado automaticamente",
+                    target_modules=target_modules
+                )
+            
             # Cria configuração LoRA
             peft_config = LoraConfig(
                 r=lora_config.r,
                 lora_alpha=lora_config.lora_alpha,
-                target_modules=lora_config.target_modules,
+                target_modules=target_modules,
                 lora_dropout=lora_config.lora_dropout,
                 bias=lora_config.bias,
                 task_type=task_type,
