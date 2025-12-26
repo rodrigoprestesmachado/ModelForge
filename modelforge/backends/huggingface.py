@@ -77,12 +77,13 @@ class HuggingFaceBackend(BackendBase):
                     error=str(e)
                 )
     
-    def load_model(self, config: ModelConfig) -> Any:
+    def load_model(self, config: ModelConfig, use_fp16: Optional[bool] = None) -> Any:
         """
         Carrega um modelo do Hugging Face Hub.
         
         Args:
             config: Configuração do modelo
+            use_fp16: Se deve carregar o modelo em FP16 (None = auto-detect)
             
         Returns:
             Modelo PreTrainedModel
@@ -100,7 +101,8 @@ class HuggingFaceBackend(BackendBase):
             self._logger.info(
                 "Carregando modelo",
                 model_name=config.name,
-                task=config.task
+                task=config.task,
+                use_fp16=use_fp16
             )
             
             model_kwargs: Dict[str, Any] = {
@@ -118,6 +120,14 @@ class HuggingFaceBackend(BackendBase):
             device = self.get_device()
             import torch
             
+            # Configura torch_dtype para FP16 se solicitado (economiza memória)
+            if use_fp16 and str(device).startswith("cuda") and torch.cuda.is_available():
+                model_kwargs["torch_dtype"] = torch.float16
+                self._logger.info(
+                    "Carregando modelo em FP16 para economizar memória",
+                    torch_dtype="float16"
+                )
+            
             # Configura device_map para carregar diretamente na GPU quando disponível
             # Isso evita carregar na CPU primeiro e depois mover, economizando memória
             use_device_map = False
@@ -126,6 +136,24 @@ class HuggingFaceBackend(BackendBase):
                 # Isso é mais eficiente que carregar na CPU e depois mover
                 model_kwargs["device_map"] = "auto"
                 model_kwargs["low_cpu_mem_usage"] = True
+                
+                # Configura max_memory para evitar OOM (deixa ~1GB livre)
+                try:
+                    gpu_memory = torch.cuda.get_device_properties(0).total_memory
+                    # Reserva ~1GB para operações e buffers
+                    max_memory_gb = max(1, (gpu_memory / 1024**3) - 1)
+                    model_kwargs["max_memory"] = {0: f"{max_memory_gb:.0f}GB"}
+                    self._logger.info(
+                        "Configurando max_memory para evitar OOM",
+                        max_memory_gb=f"{max_memory_gb:.2f}",
+                        total_gpu_memory_gb=f"{gpu_memory / 1024**3:.2f}"
+                    )
+                except Exception as e:
+                    self._logger.warning(
+                        "Não foi possível configurar max_memory",
+                        error=str(e)
+                    )
+                
                 use_device_map = True
                 self._logger.info(
                     "Carregando modelo diretamente na GPU usando device_map",
@@ -744,6 +772,23 @@ class HuggingFaceBackend(BackendBase):
             Dict com resultados do treinamento
         """
         self._logger.info("Iniciando treinamento")
+        
+        # Log de memória antes do treinamento
+        try:
+            import torch
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated() / 1024**3
+                memory_reserved = torch.cuda.memory_reserved() / 1024**3
+                memory_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                self._logger.info(
+                    "Estado de memória CUDA antes do treinamento",
+                    allocated_gb=f"{memory_allocated:.2f}",
+                    reserved_gb=f"{memory_reserved:.2f}",
+                    total_gb=f"{memory_total:.2f}",
+                    free_gb=f"{memory_total - memory_reserved:.2f}"
+                )
+        except Exception as e:
+            self._logger.debug(f"Erro ao verificar memória: {e}")
         
         try:
             train_result = trainer.train(

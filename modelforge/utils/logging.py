@@ -13,6 +13,35 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 
+# Contexto global de logging para configuração padrão
+_logging_context: Dict[str, Any] = {
+    "default_json_format": True,
+    "default_level": "INFO",
+}
+
+
+def set_logging_defaults(json_format: bool = True, level: str = "INFO") -> None:
+    """
+    Define configurações padrão globais para logging.
+    
+    Args:
+        json_format: Formato padrão (True = JSON, False = texto)
+        level: Nível padrão de log
+    """
+    _logging_context["default_json_format"] = json_format
+    _logging_context["default_level"] = level.upper()
+
+
+def get_logging_defaults() -> Dict[str, Any]:
+    """
+    Retorna as configurações padrão de logging.
+    
+    Returns:
+        Dict com default_json_format e default_level
+    """
+    return _logging_context.copy()
+
+
 class StructuredLogger:
     """
     Logger estruturado com suporte a formato JSON.
@@ -48,8 +77,8 @@ class StructuredLogger:
     def __init__(
         self,
         name: str,
-        level: str = "INFO",
-        json_format: bool = True,
+        level: Optional[str] = None,
+        json_format: Optional[bool] = None,
         log_file: Optional[Union[str, Path]] = None,
         include_timestamp: bool = True,
     ) -> None:
@@ -58,14 +87,16 @@ class StructuredLogger:
         
         Args:
             name: Nome do logger
-            level: Nível de log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-            json_format: Se deve usar formato JSON
+            level: Nível de log (DEBUG, INFO, WARNING, ERROR, CRITICAL). 
+                  Se None, usa o padrão global.
+            json_format: Se deve usar formato JSON. Se None, usa o padrão global.
             log_file: Arquivo para salvar logs (opcional)
             include_timestamp: Incluir timestamp nos logs
         """
         self.name = name
-        self.level = level.upper()
-        self.json_format = json_format
+        # Usa padrão global se não especificado
+        self.level = (level or _logging_context["default_level"]).upper()
+        self.json_format = json_format if json_format is not None else _logging_context["default_json_format"]
         self.include_timestamp = include_timestamp
         self._context: Dict[str, Any] = {}
         
@@ -299,16 +330,16 @@ class StructuredLogger:
 
 def get_logger(
     name: str = "modelforge",
-    level: str = "INFO",
-    json_format: bool = True,
+    level: Optional[str] = None,
+    json_format: Optional[bool] = None,
 ) -> StructuredLogger:
     """
     Factory function para criar loggers.
     
     Args:
         name: Nome do logger
-        level: Nível de log
-        json_format: Se deve usar formato JSON
+        level: Nível de log (usa padrão global se None)
+        json_format: Se deve usar formato JSON (usa padrão global se None)
         
     Returns:
         StructuredLogger configurado

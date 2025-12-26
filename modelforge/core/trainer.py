@@ -96,6 +96,14 @@ class ModelTrainer:
             logger: Logger estruturado
         """
         self._config = config
+        
+        # Configura padrões globais de logging
+        from modelforge.utils.logging import set_logging_defaults
+        set_logging_defaults(
+            json_format=config.logging.format == "json",
+            level=config.logging.level
+        )
+        
         self._logger = logger or StructuredLogger(
             "trainer",
             level=config.logging.level,
@@ -121,7 +129,8 @@ class ModelTrainer:
         if infrastructure is None:
             infrastructure = InfrastructureFactory.create_infrastructure(
                 config.infrastructure.type.value,
-                config.infrastructure
+                config.infrastructure,
+                logger=self._logger
             )
         self._infrastructure = infrastructure
         
@@ -186,8 +195,9 @@ class ModelTrainer:
             # Carrega tokenizer
             self._tokenizer = self._backend.load_tokenizer(self._config.model)
             
-            # Carrega modelo
-            self._model = self._backend.load_model(self._config.model)
+            # Carrega modelo com otimização de memória (FP16 se configurado)
+            use_fp16 = self._config.training.fp16 if self._config.training else None
+            self._model = self._backend.load_model(self._config.model, use_fp16=use_fp16)
             
             # Aplica LoRA se configurado
             if self._config.lora and self._config.lora.enabled:
@@ -278,6 +288,23 @@ class ModelTrainer:
             batch_size=self._config.training.batch_size,
             learning_rate=self._config.training.learning_rate
         )
+        
+        # Limpa cache CUDA antes do treinamento para liberar memória
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+                self._logger.info(
+                    "Cache CUDA limpo antes do treinamento",
+                    memory_allocated=f"{torch.cuda.memory_allocated() / 1024**3:.2f} GB",
+                    memory_reserved=f"{torch.cuda.memory_reserved() / 1024**3:.2f} GB"
+                )
+        except Exception as e:
+            self._logger.warning(
+                "Não foi possível limpar cache CUDA",
+                error=str(e)
+            )
         
         try:
             # Cria output dir

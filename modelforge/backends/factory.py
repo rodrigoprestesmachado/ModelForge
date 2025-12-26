@@ -41,7 +41,14 @@ class BackendFactory:
         "hf": HuggingFaceBackend,  # Alias
     }
     
-    _logger = StructuredLogger("backend_factory")
+    _logger: Optional[StructuredLogger] = None
+    
+    @classmethod
+    def _get_logger(cls) -> StructuredLogger:
+        """Retorna o logger da factory, criando se necessário."""
+        if cls._logger is None:
+            cls._logger = StructuredLogger("backend_factory")
+        return cls._logger
     
     @classmethod
     def create_backend(
@@ -77,7 +84,7 @@ class BackendFactory:
         
         backend_class = cls._backends[backend_type]
         
-        cls._logger.info(
+        cls._get_logger().info(
             "Criando backend",
             backend_type=backend_type,
             backend_class=backend_class.__name__
@@ -109,7 +116,7 @@ class BackendFactory:
             )
         
         cls._backends[name.lower()] = backend_class
-        cls._logger.info(
+        cls._get_logger().info(
             "Backend registrado",
             name=name,
             backend_class=backend_class.__name__
@@ -126,7 +133,7 @@ class BackendFactory:
         name = name.lower()
         if name in cls._backends:
             del cls._backends[name]
-            cls._logger.info("Backend removido", name=name)
+            cls._get_logger().info("Backend removido", name=name)
     
     @classmethod
     def list_backends(cls) -> Dict[str, str]:

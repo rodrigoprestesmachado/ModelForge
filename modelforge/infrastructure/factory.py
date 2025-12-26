@@ -130,7 +130,14 @@ class InfrastructureFactory:
         "cloud": CloudInfrastructure,
     }
     
-    _logger = StructuredLogger("infrastructure_factory")
+    _logger: Optional[StructuredLogger] = None
+    
+    @classmethod
+    def _get_logger(cls) -> StructuredLogger:
+        """Retorna o logger da factory, criando se necessário."""
+        if cls._logger is None:
+            cls._logger = StructuredLogger("infrastructure_factory")
+        return cls._logger
     
     @classmethod
     def create_infrastructure(
@@ -165,7 +172,7 @@ class InfrastructureFactory:
         
         infra_class = cls._infrastructures[infra_type]
         
-        cls._logger.info(
+        cls._get_logger().info(
             "Criando infraestrutura",
             type=infra_type,
             class_name=infra_class.__name__
@@ -199,7 +206,7 @@ class InfrastructureFactory:
             )
         
         cls._infrastructures[name.lower()] = infra_class
-        cls._logger.info(
+        cls._get_logger().info(
             "Infraestrutura registrada",
             name=name,
             class_name=infra_class.__name__
@@ -211,7 +218,7 @@ class InfrastructureFactory:
         name = name.lower()
         if name in cls._infrastructures:
             del cls._infrastructures[name]
-            cls._logger.info("Infraestrutura removida", name=name)
+            cls._get_logger().info("Infraestrutura removida", name=name)
     
     @classmethod
     def list_infrastructures(cls) -> Dict[str, str]:
@@ -266,6 +273,6 @@ class InfrastructureFactory:
             Infraestrutura apropriada para o ambiente
         """
         infra_type = cls.auto_detect()
-        cls._logger.info(f"Infraestrutura detectada automaticamente: {infra_type}")
+        cls._get_logger().info(f"Infraestrutura detectada automaticamente: {infra_type}")
         return cls.create_infrastructure(infra_type, config, **kwargs)
 
