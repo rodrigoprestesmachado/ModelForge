@@ -553,24 +553,74 @@ class HuggingFaceBackend(BackendBase):
             # Aplica LoRA ao modelo
             model = get_peft_model(model, peft_config)
             
-            # Garante que o modelo está em modo de treinamento
+            # IMPORTANTE: Garante que o modelo está em modo de treinamento
             model.train()
+            
+            # IMPORTANTE: Move o modelo para o dispositivo correto após aplicar LoRA
+            # Isso garante que todos os parâmetros (incluindo LoRA) estão no device correto
+            try:
+                model = model.to(device)
+                # Verifica se está realmente no device correto
+                sample_param = next(model.parameters())
+                if sample_param.device != device:
+                    self._logger.warning(
+                        f"Modelo não está no device esperado. Esperado: {device}, Atual: {sample_param.device}"
+                    )
+                    # Tenta mover novamente
+                    model = model.to(device)
+            except Exception as e:
+                self._logger.warning(
+                    f"Erro ao mover modelo para device após LoRA: {e}"
+                )
             
             # Verifica se há parâmetros treináveis
             trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
             if len(trainable_params) == 0:
-                self._logger.warning(
-                    "Nenhum parâmetro treinável encontrado após aplicar LoRA. "
-                    "Isso pode indicar um problema com a configuração do modelo."
+                self._logger.error(
+                    "CRÍTICO: Nenhum parâmetro treinável encontrado após aplicar LoRA!"
                 )
+                # Tenta corrigir habilitando requires_grad para parâmetros LoRA
+                for name, param in model.named_parameters():
+                    if "lora" in name.lower():
+                        param.requires_grad = True
+                        trainable_params.append(name)
+                        self._logger.info(f"Forçando requires_grad=True para: {name}")
+                
+                # Se ainda não encontrou, tenta enable_input_require_grads
+                if len(trainable_params) == 0 and hasattr(model, "enable_input_require_grads"):
+                    model.enable_input_require_grads()
+                    trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
+                    self._logger.info("Usando enable_input_require_grads()")
+                
+                if len(trainable_params) == 0:
+                    raise BackendError(
+                        "Falha crítica: Nenhum parâmetro treinável após aplicar LoRA. "
+                        "Verifique a configuração do modelo e LoRA.",
+                        backend_type="huggingface",
+                        operation="apply_lora"
+                    )
             else:
                 self._logger.info(
                     "LoRA aplicado com sucesso",
-                    trainable_params=len(trainable_params)
+                    trainable_params=len(trainable_params),
+                    device=str(device)
                 )
             
             # Imprime estatísticas do modelo
             model.print_trainable_parameters()
+            
+            # Verificação final: garante que o modelo está pronto para treinamento
+            try:
+                sample_param = next(model.parameters())
+                actual_device = sample_param.device
+                self._logger.info(
+                    "Validação final do modelo com LoRA",
+                    device=str(actual_device),
+                    is_training=model.training,
+                    trainable_count=len(trainable_params)
+                )
+            except Exception as e:
+                self._logger.warning(f"Erro na validação final: {e}")
             
             return model
             
@@ -821,6 +871,19 @@ class HuggingFaceBackend(BackendBase):
         # Obtém device para garantir uso de GPU
         device = self.get_device()
         
+        # IMPORTANTE: Se gradient_checkpointing está ativo, garante que use_cache está desabilitado
+        # Isso evita o warning e problemas com gradientes
+        if training_config.gradient_checkpointing:
+            if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+                model.config.use_cache = False
+            if hasattr(model, "generation_config") and model.generation_config is not None:
+                if hasattr(model.generation_config, "use_cache"):
+                    model.generation_config.use_cache = False
+            # Para modelos PEFT, também verifica o modelo base
+            if hasattr(model, "base_model"):
+                if hasattr(model.base_model, "config") and hasattr(model.base_model.config, "use_cache"):
+                    model.base_model.config.use_cache = False
+        
         # Configura TrainingArguments
         training_args = TrainingArguments(
             output_dir=output_dir,
@@ -862,6 +925,38 @@ class HuggingFaceBackend(BackendBase):
         import torch
         model.train()
         
+        # IMPORTANTE: Garante que os parâmetros têm requires_grad=True antes de criar o Trainer
+        # Isso é especialmente crítico quando usando gradient checkpointing
+        is_peft_model = hasattr(model, "peft_config") or hasattr(model, "get_peft_model")
+        
+        # Verifica se há parâmetros treináveis
+        trainable_params_before = [name for name, param in model.named_parameters() if param.requires_grad]
+        
+        if len(trainable_params_before) == 0:
+            self._logger.warning(
+                "Nenhum parâmetro está treinável antes de criar Trainer. "
+                "Tentando habilitar requires_grad..."
+            )
+            if is_peft_model:
+                # Para modelos PEFT, habilita requires_grad para parâmetros LoRA
+                for name, param in model.named_parameters():
+                    if "lora" in name.lower():
+                        param.requires_grad = True
+                # Tenta enable_input_require_grads se disponível
+                if hasattr(model, "enable_input_require_grads"):
+                    model.enable_input_require_grads()
+            else:
+                # Para modelos normais, habilita requires_grad para todos
+                for name, param in model.named_parameters():
+                    param.requires_grad = True
+        
+        # Verifica novamente após tentar habilitar
+        trainable_params_after = [name for name, param in model.named_parameters() if param.requires_grad]
+        if len(trainable_params_after) == 0:
+            self._logger.error(
+                "CRÍTICO: Nenhum parâmetro está treinável após tentar habilitar requires_grad!"
+            )
+        
         # Verifica se o modelo está usando device_map (pode causar problemas com treinamento)
         has_device_map = hasattr(model, "hf_device_map")
         
@@ -895,29 +990,8 @@ class HuggingFaceBackend(BackendBase):
         # Verifica e habilita requires_grad para parâmetros treináveis
         # Quando usando LoRA/PEFT, apenas alguns parâmetros devem ter requires_grad=True
         # Mas precisamos garantir que pelo menos alguns parâmetros estejam treináveis
-        trainable_params = []
-        total_params = 0
-        for name, param in model.named_parameters():
-            total_params += 1
-            if param.requires_grad:
-                trainable_params.append(name)
-        
-        # Verifica se é modelo PEFT/LoRA
-        is_peft_model = hasattr(model, "peft_config") or hasattr(model, "get_peft_model")
-        
-        # Se não há parâmetros treináveis, tenta habilitar
-        if len(trainable_params) == 0:
-            self._logger.warning(
-                "Nenhum parâmetro está treinável! Tentando habilitar requires_grad..."
-            )
-            # Tenta habilitar requires_grad para todos os parâmetros
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
-                    param.requires_grad = True
-                    trainable_params.append(name)
-            
-            # Verifica novamente
-            trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
+        trainable_params = trainable_params_after
+        total_params = sum(1 for _ in model.named_parameters())
         
         if len(trainable_params) == 0:
             # Se nenhum parâmetro está treinável, isso é um problema
@@ -958,24 +1032,61 @@ class HuggingFaceBackend(BackendBase):
         
         # Verifica se há pelo menos alguns parâmetros treináveis
         if len(trainable_params) == 0:
+            # Última tentativa: lista alguns parâmetros para debug
+            all_param_names = [name for name, _ in list(model.named_parameters())[:20]]
+            self._logger.error(
+                "ERRO CRÍTICO: Nenhum parâmetro treinável!",
+                total_params=total_params,
+                is_peft_model=is_peft_model,
+                sample_params=all_param_names[:10]
+            )
             raise BackendError(
                 "Nenhum parâmetro do modelo está configurado para treinamento. "
-                "Verifique se o modelo foi configurado corretamente (LoRA, etc.)",
+                "Verifique se o modelo foi configurado corretamente (LoRA, etc.). "
+                f"Total de parâmetros: {total_params}, Modelo PEFT: {is_peft_model}",
                 backend_type="huggingface",
                 operation="create_trainer"
             )
         
-        self._logger.info(
-            "Modelo configurado para treinamento",
-            trainable_params=len(trainable_params),
-            total_params=total_params,
-            trainable_ratio=f"{len(trainable_params)/total_params*100:.2f}%" if total_params > 0 else "0%",
-            is_peft_model=is_peft_model
-        )
+        # Validação final antes de criar o Trainer
+        try:
+            sample_param = next(model.parameters())
+            actual_device = sample_param.device
+            self._logger.info(
+                "Modelo configurado para treinamento",
+                trainable_params=len(trainable_params),
+                total_params=total_params,
+                trainable_ratio=f"{len(trainable_params)/total_params*100:.2f}%" if total_params > 0 else "0%",
+                is_peft_model=is_peft_model,
+                device=str(actual_device),
+                is_training=model.training,
+                on_gpu=(actual_device.type == "cuda" if str(device).startswith("cuda") else False)
+            )
+        except Exception as e:
+            self._logger.warning(f"Erro na validação final: {e}")
+            self._logger.info(
+                "Modelo configurado para treinamento",
+                trainable_params=len(trainable_params),
+                total_params=total_params,
+                is_peft_model=is_peft_model
+            )
         
         # Função de métricas padrão se não fornecida
         if compute_metrics is None and eval_config:
             compute_metrics = self._create_compute_metrics(eval_config.metrics)
+        
+        # Validação final antes de criar o Trainer
+        # Garante que o modelo está pronto
+        model.train()  # Garante modo de treinamento
+        try:
+            # Testa se consegue acessar um parâmetro
+            sample_param = next(model.parameters())
+            if not sample_param.requires_grad and len(trainable_params) > 0:
+                # Se o sample não tem requires_grad mas há parâmetros treináveis, está OK
+                # (pode ser que o sample seja um buffer)
+                pass
+        except Exception as e:
+            self._logger.warning(f"Erro ao validar modelo antes de criar Trainer: {e}")
         
         # Cria o Trainer
         trainer = Trainer(
@@ -988,7 +1099,11 @@ class HuggingFaceBackend(BackendBase):
         )
         
         self._trainer = trainer
-        self._logger.info("Trainer criado com sucesso")
+        self._logger.info(
+            "Trainer criado com sucesso",
+            trainable_params=len(trainable_params),
+            gradient_checkpointing=training_config.gradient_checkpointing
+        )
         
         return trainer
     

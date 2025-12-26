@@ -219,30 +219,89 @@ class ModelTrainer:
                     self._model,
                     self._config.lora
                 )
-                # Verifica se o modelo com LoRA está na GPU
-                # Quando usando device_map, o modelo já está no device correto
+                # O apply_lora já move o modelo para o device correto
+                # Apenas verifica se está tudo OK
                 device = self._infrastructure.get_device()
-                if str(device).startswith("cuda"):
-                    import torch
-                    # Verifica se já está usando device_map (não deve mover novamente)
-                    if not hasattr(self._model, "hf_device_map"):
-                        # Só tenta mover se não estiver usando device_map
-                        try:
-                            actual_device = next(self._model.parameters()).device
-                            if actual_device.type != "cuda":
-                                self._logger.info("Movendo modelo com LoRA para GPU")
-                                self._model = self._model.to(device)
-                            else:
-                                self._logger.info("Modelo com LoRA já está na GPU")
-                        except StopIteration:
-                            self._logger.warning("Não foi possível verificar device do modelo com LoRA")
-                    else:
-                        self._logger.info("Modelo com LoRA usando device_map (já está no device correto)")
+                try:
+                    actual_device = next(self._model.parameters()).device
+                    self._logger.info(
+                        "Modelo com LoRA configurado",
+                        expected_device=str(device),
+                        actual_device=str(actual_device),
+                        is_on_gpu=(actual_device.type == "cuda" if str(device).startswith("cuda") else True)
+                    )
+                except StopIteration:
+                    self._logger.warning("Não foi possível verificar device do modelo com LoRA")
+            
+            # IMPORTANTE: Garante que o modelo está em modo de treinamento
+            # e que os parâmetros têm requires_grad=True antes de aplicar gradient checkpointing
+            self._model.train()
+            
+            # Verifica e habilita requires_grad para parâmetros treináveis
+            # Para modelos LoRA/PEFT, apenas os parâmetros LoRA devem ter requires_grad=True
+            # Mas precisamos garantir que pelo menos alguns parâmetros estejam treináveis
+            trainable_params = [name for name, param in self._model.named_parameters() if param.requires_grad]
+            is_peft_model = hasattr(self._model, "peft_config") or hasattr(self._model, "get_peft_model")
+            
+            if len(trainable_params) == 0:
+                self._logger.warning(
+                    "Nenhum parâmetro está treinável antes de aplicar gradient checkpointing. "
+                    "Tentando habilitar requires_grad..."
+                )
+                if is_peft_model:
+                    # Para modelos PEFT, tenta habilitar requires_grad para parâmetros LoRA
+                    for name, param in self._model.named_parameters():
+                        if "lora" in name.lower():
+                            param.requires_grad = True
+                            trainable_params.append(name)
+                    # Se ainda não encontrou, tenta enable_input_require_grads
+                    if len(trainable_params) == 0 and hasattr(self._model, "enable_input_require_grads"):
+                        self._model.enable_input_require_grads()
+                else:
+                    # Para modelos normais, habilita requires_grad para todos os parâmetros
+                    for name, param in self._model.named_parameters():
+                        param.requires_grad = True
+                        trainable_params.append(name)
+            
+            if len(trainable_params) > 0:
+                self._logger.info(
+                    "Parâmetros treináveis configurados",
+                    count=len(trainable_params),
+                    is_peft_model=is_peft_model
+                )
+            else:
+                # Se ainda não há parâmetros treináveis, isso é um problema crítico
+                self._logger.error(
+                    "ERRO CRÍTICO: Nenhum parâmetro treinável após todas as tentativas!"
+                )
+                # Lista alguns parâmetros para debug
+                param_names = [name for name, _ in list(self._model.named_parameters())[:10]]
+                self._logger.debug(f"Primeiros 10 parâmetros: {param_names}")
             
             # Aplica gradient checkpointing se configurado
+            # IMPORTANTE: Gradient checkpointing deve ser aplicado DEPOIS de garantir
+            # que os parâmetros têm requires_grad=True
             if self._config.training.gradient_checkpointing:
                 if hasattr(self._model, "gradient_checkpointing_enable"):
+                    # Para modelos PEFT, precisamos garantir que o modelo base também
+                    # está configurado corretamente para gradient checkpointing
+                    if is_peft_model and hasattr(self._model, "base_model"):
+                        # Aplica gradient checkpointing no modelo base
+                        if hasattr(self._model.base_model, "gradient_checkpointing_enable"):
+                            self._model.base_model.gradient_checkpointing_enable()
                     self._model.gradient_checkpointing_enable()
+                    
+                    # IMPORTANTE: Desabilita use_cache quando gradient checkpointing está ativo
+                    # use_cache=True é incompatível com gradient checkpointing
+                    if hasattr(self._model, "config"):
+                        if hasattr(self._model.config, "use_cache"):
+                            self._model.config.use_cache = False
+                            self._logger.info("use_cache desabilitado (incompatível com gradient checkpointing)")
+                        # Também verifica generation_config
+                        if hasattr(self._model, "generation_config") and self._model.generation_config is not None:
+                            if hasattr(self._model.generation_config, "use_cache"):
+                                self._model.generation_config.use_cache = False
+                    
                     self._logger.info("Gradient checkpointing ativado")
                 else:
                     self._logger.warning(
@@ -322,6 +381,9 @@ class ModelTrainer:
             )
         
         try:
+            # Validação final antes de iniciar o treinamento
+            self._validate_before_training()
+            
             # Cria output dir
             output_dir = Path(self._config.checkpoints.save_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -453,6 +515,87 @@ class ModelTrainer:
         )
         
         return url
+    
+    def _validate_before_training(self) -> None:
+        """
+        Valida que tudo está configurado corretamente antes de iniciar o treinamento.
+        
+        Raises:
+            TrainingError: Se alguma validação falhar
+        """
+        self._logger.info("Validando configuração antes do treinamento")
+        
+        # Valida modelo
+        if self._model is None:
+            raise TrainingError("Modelo não foi carregado")
+        
+        # Valida tokenizer
+        if self._tokenizer is None:
+            raise TrainingError("Tokenizer não foi carregado")
+        
+        # Valida dataset
+        if self._train_dataset is None:
+            raise TrainingError("Dataset de treinamento não foi carregado")
+        
+        # Valida que o modelo está em modo de treinamento
+        if not self._model.training:
+            self._logger.warning("Modelo não está em modo de treinamento, corrigindo...")
+            self._model.train()
+        
+        # Valida que há parâmetros treináveis
+        import torch
+        trainable_params = [name for name, param in self._model.named_parameters() if param.requires_grad]
+        if len(trainable_params) == 0:
+            raise TrainingError(
+                "Nenhum parâmetro treinável encontrado. "
+                "Verifique se LoRA está configurado corretamente ou se o modelo foi congelado."
+            )
+        
+        # Valida device (se GPU está disponível, modelo deve estar na GPU)
+        device = self._infrastructure.get_device()
+        if str(device).startswith("cuda") and torch.cuda.is_available():
+            try:
+                sample_param = next(self._model.parameters())
+                if sample_param.device.type != "cuda":
+                    self._logger.warning(
+                        f"Modelo não está na GPU. Esperado: cuda, Atual: {sample_param.device.type}. "
+                        "Tentando mover para GPU..."
+                    )
+                    self._model = self._model.to(device)
+                    sample_param = next(self._model.parameters())
+                    if sample_param.device.type != "cuda":
+                        raise TrainingError(
+                            f"Falha ao mover modelo para GPU. Device atual: {sample_param.device}"
+                        )
+            except StopIteration:
+                self._logger.warning("Não foi possível verificar device do modelo")
+        
+        # Valida dataset não está vazio
+        try:
+            dataset_size = len(self._train_dataset)
+            if dataset_size == 0:
+                raise TrainingError("Dataset de treinamento está vazio")
+            self._logger.info(f"Dataset de treinamento tem {dataset_size} exemplos")
+        except (TypeError, AttributeError):
+            # Dataset pode ser streaming ou não ter __len__
+            self._logger.info("Dataset de treinamento carregado (tamanho não disponível)")
+        
+        # Valida configuração de gradient checkpointing
+        if self._config.training.gradient_checkpointing:
+            # Verifica se use_cache está desabilitado
+            if hasattr(self._model, "config") and hasattr(self._model.config, "use_cache"):
+                if self._model.config.use_cache:
+                    self._logger.warning(
+                        "use_cache está habilitado com gradient checkpointing. Desabilitando..."
+                    )
+                    self._model.config.use_cache = False
+        
+        self._logger.info(
+            "Validação concluída",
+            trainable_params=len(trainable_params),
+            model_training=self._model.training,
+            device=str(device)
+        )
     
     def cleanup(self) -> None:
         """Limpa recursos alocados."""

@@ -1,104 +1,79 @@
-# ModelForge - Fine-tuning Gemma 3 4B IT com CPC 2015 Brasil
-# Configuração para treinamento remoto (Google Colab ou Cloud)
+# ModelForge - Fine-tuning Gemma 3 1B IT com CPC 2015 Brasil
+# Configuração otimizada para Google Colab com GPU Tesla T4 (14GB)
+# IMPORTANTE: Com LoRA habilitado, device_map será desabilitado automaticamente
 
 # ============================================================================
 # CONFIGURAÇÃO DO MODELO
 # ============================================================================
 model:
-  # Gemma 3 4B Instruction-Tuned
-  name: "google/gemma-3-4b-it"
+  name: "google/gemma-3-1b-it"
   version: "latest"
   repository: "huggingface"
   framework: "pytorch"
-  
-  # Para modelos de geração de texto
   task: "text-generation"
-  
-  # Revisão específica (opcional)
-  # revision: "main"
 
 # ============================================================================
 # CONFIGURAÇÃO DO DATASET
 # ============================================================================
 dataset:
-  # Dataset CPC 2015 Brasil
   name: "0rakul0/cpc_2015_brasil"
   repository: "huggingface"
   
-  # Configuração de splits
   splits:
     train: "train"
-    # validation: "validation"  # Descomente se houver split de validação
+    # validation: "validation"  # Descomente se o dataset tiver split de validação
   
-  # Mapeamento de colunas - AJUSTE conforme a estrutura do dataset
-  # Verifique as colunas do dataset em: https://huggingface.co/datasets/0rakul0/cpc_2015_brasil
   columns:
-    text: "text"  # Coluna principal de texto
-    # label: "label"  # Descomente se for classificação
+    text: "text"  # Ajuste conforme a estrutura real do dataset
   
-  # Pré-processamento otimizado para Gemma
   preprocessing:
-    max_length: 2048  # Gemma suporta contextos maiores
+    max_length: 512  # Adequado para Gemma 1B e economiza memória
     truncation: true
     padding: "max_length"
     return_tensors: "pt"
   
-  # Streaming para datasets grandes
   streaming: false
 
 # ============================================================================
 # CONFIGURAÇÃO DE TREINAMENTO
-# Otimizado para GPU com memória limitada (Colab free/pro)
+# Otimizado para GPU Tesla T4 (14GB) no Colab
 # ============================================================================
 training:
-  # Batch size pequeno para caber na memória
   batch_size: 1
-  
-  # Learning rate baixo para fine-tuning
   learning_rate: 2.0e-5
-  
-  # Número de épocas
   epochs: 3
-  
-  # Scheduler de learning rate
   scheduler: "cosine"
-  
-  # Warmup
   warmup_ratio: 0.1
-  
-  # Regularização
   weight_decay: 0.01
-  
-  # Acumulação de gradiente para simular batch maior
-  # Batch efetivo = batch_size * gradient_accumulation_steps = 1 * 16 = 16
-  gradient_accumulation_steps: 16
-  
-  # Precisão mista para economizar memória e acelerar
-  # Use bf16 se disponível (Colab Pro+ com A100)
+  gradient_accumulation_steps: 16  # Batch efetivo = 16 (reduzido de 32 para evitar problemas)
   fp16: true
   bf16: false
-  
-  # Gradient clipping
   max_grad_norm: 1.0
-  
-  # Seed para reprodutibilidade
   seed: 42
+  gradient_checkpointing: true  # Ativado para economizar memória
+
+# ============================================================================
+# CONFIGURAÇÃO DE LoRA (Recomendado para economizar memória)
+# IMPORTANTE: Com LoRA habilitado, device_map será desabilitado automaticamente
+# para evitar problemas com gradientes durante o treinamento
+# ============================================================================
+lora:
+  enabled: true
+  r: 8  # Aumentado de 4 para 8 (melhor capacidade de adaptação)
+  lora_alpha: 16  # Geralmente 2x o r
+  lora_dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+  target_modules: null  # Auto-detect para Gemma (q_proj, k_proj, v_proj, o_proj)
 
 # ============================================================================
 # CONFIGURAÇÃO DE AVALIAÇÃO
 # ============================================================================
 evaluation:
-  # Métricas para geração de texto
   metrics:
     - "perplexity"
-  
-  # Estratégia de salvamento
   save_strategy: "epoch"
-  
-  # Carregar melhor modelo ao final
   load_best_model_at_end: true
-  
-  # Métrica para selecionar melhor modelo
   metric_for_best_model: "eval_loss"
   greater_is_better: false
 
@@ -106,67 +81,41 @@ evaluation:
 # CONFIGURAÇÃO DE CHECKPOINTS
 # ============================================================================
 checkpoints:
-  # Diretório para checkpoints (no Colab, use /content/checkpoints)
   save_dir: "/content/checkpoints"
-  
-  # Manter apenas os melhores checkpoints
   max_to_keep: 2
 
 # ============================================================================
 # CONFIGURAÇÃO DE VERSIONAMENTO
 # ============================================================================
 versioning:
-  # Nome do modelo no Hub (substitua pelo seu username)
-  hub_name: "seu-username/gemma-3-4b-cpc-brasil"
-  
-  # Fazer push automático para o Hub
-  push_to_hub: true
-  
-  # Modelo privado
+  hub_name: "seu-username/gemma-3-1b-cpc-brasil"  # CORRIGIDO: agora reflete o modelo 1B
+  push_to_hub: false  # Mude para true se quiser fazer push automático
   private: true
-  
-  # Estratégia de push
-  hub_strategy: "end"  # Push apenas no final
+  hub_strategy: "end"
 
 # ============================================================================
 # CONFIGURAÇÃO DE INFRAESTRUTURA
-# Configurado para Google Colab
 # ============================================================================
 infrastructure:
-  # Tipo: colab para Google Colab
   type: "colab"
-  
-  # Recursos
   resources:
     gpu: true
     gpu_count: 1
-    # memory_gb: 16  # Colab Pro
 
 # ============================================================================
 # CREDENCIAIS
-# Configure a variável de ambiente HF_TOKEN
+# Configure a variável de ambiente HF_TOKEN no Colab:
+# import os
+# os.environ['HF_TOKEN'] = 'seu_token_aqui'
+# OU use Secrets: from google.colab import userdata
+# os.environ['HF_TOKEN'] = userdata.get('HF_TOKEN')
 # ============================================================================
 credentials:
-  # Token do Hugging Face (necessário para Gemma)
   huggingface_token: "${HF_TOKEN}"
-
-# ============================================================================
-# EXPORTAÇÃO (após treinamento)
-# ============================================================================
-export:
-  format: "docker"
-  output_dir: "/content/output"
-  
-  api:
-    framework: "flask"
-    endpoints:
-      - "chat/completions"
-      - "completions"
-    port: 8000
 
 # ============================================================================
 # LOGGING
 # ============================================================================
 logging:
   level: "INFO"
-  format: "json"
+  format: "text"  # "text" é mais legível que "json" para desenvolvimento
