@@ -129,11 +129,14 @@ class HuggingFaceBackend(BackendBase):
                 )
             
             # Configura device_map para carregar diretamente na GPU quando disponível
-            # Isso evita carregar na CPU primeiro e depois mover, economizando memória
+            # AVISO: device_map="auto" pode causar problemas com treinamento em alguns casos
+            # Mas é necessário para modelos grandes que não cabem na memória
+            # Vamos usar device_map mas garantir que o modelo está configurado corretamente
             use_device_map = False
             if str(device).startswith("cuda") and torch.cuda.is_available():
                 # Carrega diretamente na GPU usando device_map
                 # Isso é mais eficiente que carregar na CPU e depois mover
+                # NOTA: Pode causar problemas com treinamento, mas vamos corrigir depois
                 model_kwargs["device_map"] = "auto"
                 model_kwargs["low_cpu_mem_usage"] = True
                 
@@ -222,11 +225,36 @@ class HuggingFaceBackend(BackendBase):
                                 actual_device=str(actual_device)
                             )
             
+            # IMPORTANTE: Garante que o modelo está em modo de treinamento
+            # Isso é crítico quando usando device_map="auto" que pode carregar em modo de inferência
+            model.train()
+            
+            # Quando usando device_map="auto", o modelo pode ser carregado em modo de inferência
+            # Precisamos garantir que os parâmetros possam calcular gradientes
+            # NOTA: Se LoRA for aplicado depois, o PEFT vai gerenciar requires_grad automaticamente
+            # Mas para o modelo base, precisamos garantir que está configurado para treinamento
+            trainable_count = 0
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    # Habilita requires_grad para parâmetros que não são buffers
+                    # Buffers geralmente não precisam de gradientes (ex: running_mean em BatchNorm)
+                    if "buffer" not in name.lower() and "running" not in name.lower():
+                        param.requires_grad = True
+                        trainable_count += 1
+            
+            if trainable_count > 0:
+                self._logger.info(
+                    f"Habilitado requires_grad para {trainable_count} parâmetros após carregamento com device_map"
+                )
+            
             self._model = model
             
-            # Log detalhado sobre o device
+            # Log detalhado sobre o device e parâmetros treináveis
             try:
                 actual_device = next(model.parameters()).device
+                trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                total_params = sum(p.numel() for p in model.parameters())
+                
                 self._logger.info(
                     "Modelo carregado com sucesso",
                     model_name=config.name,
@@ -234,7 +262,10 @@ class HuggingFaceBackend(BackendBase):
                     target_device=str(device),
                     actual_device=str(actual_device),
                     on_gpu=(actual_device.type == "cuda"),
-                    used_device_map=use_device_map
+                    used_device_map=use_device_map,
+                    trainable_params=trainable_params,
+                    total_params=total_params,
+                    trainable_ratio=f"{trainable_params/total_params*100:.2f}%" if total_params > 0 else "0%"
                 )
             except StopIteration:
                 # Modelo sem parâmetros (improvável)
@@ -757,6 +788,36 @@ class HuggingFaceBackend(BackendBase):
         import torch
         model.train()
         
+        # Verifica se o modelo está usando device_map (pode causar problemas com treinamento)
+        has_device_map = hasattr(model, "hf_device_map")
+        
+        # PROBLEMA CONHECIDO: device_map="auto" pode interferir com treinamento
+        # Quando usando device_map, o modelo pode estar distribuído de forma que
+        # o Trainer não consegue calcular gradientes corretamente
+        # Vamos tentar remover o device_map se necessário
+        if has_device_map:
+            self._logger.warning(
+                "Modelo carregado com device_map. "
+                "Isso pode causar problemas com treinamento. "
+                "Tentando consolidar modelo em um único dispositivo..."
+            )
+            try:
+                # Tenta mover o modelo para um único dispositivo
+                # Isso remove o device_map e consolida o modelo
+                device = self.get_device()
+                if str(device).startswith("cuda"):
+                    # Move todos os parâmetros para a GPU
+                    model = model.to(device)
+                    # Remove o device_map se possível
+                    if hasattr(model, "hf_device_map"):
+                        delattr(model, "hf_device_map")
+                    self._logger.info("Modelo consolidado em um único dispositivo para treinamento")
+            except Exception as e:
+                self._logger.warning(
+                    f"Não foi possível consolidar modelo: {e}. "
+                    "Continuando com device_map..."
+                )
+        
         # Verifica e habilita requires_grad para parâmetros treináveis
         # Quando usando LoRA/PEFT, apenas alguns parâmetros devem ter requires_grad=True
         # Mas precisamos garantir que pelo menos alguns parâmetros estejam treináveis
@@ -769,6 +830,20 @@ class HuggingFaceBackend(BackendBase):
         
         # Verifica se é modelo PEFT/LoRA
         is_peft_model = hasattr(model, "peft_config") or hasattr(model, "get_peft_model")
+        
+        # Se não há parâmetros treináveis, tenta habilitar
+        if len(trainable_params) == 0:
+            self._logger.warning(
+                "Nenhum parâmetro está treinável! Tentando habilitar requires_grad..."
+            )
+            # Tenta habilitar requires_grad para todos os parâmetros
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    param.requires_grad = True
+                    trainable_params.append(name)
+            
+            # Verifica novamente
+            trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
         
         if len(trainable_params) == 0:
             # Se nenhum parâmetro está treinável, isso é um problema
