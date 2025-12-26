@@ -14,6 +14,7 @@ from modelforge.backends.base import BackendBase
 from modelforge.config.schema import (
     DatasetConfig,
     EvaluationConfig,
+    LoRAConfig,
     ModelConfig,
     TrainingConfig,
 )
@@ -90,7 +91,11 @@ class HuggingFaceBackend(BackendBase):
             BackendError: Se o modelo não puder ser carregado
         """
         try:
-            from transformers import AutoModelForSequenceClassification, AutoModel
+            from transformers import (
+                AutoModelForSequenceClassification,
+                AutoModelForCausalLM,
+                AutoModel
+            )
             
             self._logger.info(
                 "Carregando modelo",
@@ -98,34 +103,63 @@ class HuggingFaceBackend(BackendBase):
                 task=config.task
             )
             
-            model_kwargs = {
+            model_kwargs: Dict[str, Any] = {
                 "pretrained_model_name_or_path": config.name,
-                "revision": config.revision,
             }
+            
+            if config.revision:
+                model_kwargs["revision"] = config.revision
             
             token = self._credentials.get("HF_TOKEN")
             if token:
                 model_kwargs["token"] = token
             
+            # Obtém dispositivo - sempre move explicitamente para garantir uso de GPU
+            device = self.get_device()
+            
             # Seleciona a classe de modelo baseado na tarefa
-            if config.task == "text-classification" or config.num_labels:
+            if config.task == "text-generation" or config.task == "causal-lm":
+                # Modelos de geração de texto (causal language models)
+                model = AutoModelForCausalLM.from_pretrained(**model_kwargs)
+            elif config.task == "text-classification" or config.num_labels:
+                # Modelos de classificação
                 if config.num_labels:
                     model_kwargs["num_labels"] = config.num_labels
                 model = AutoModelForSequenceClassification.from_pretrained(
                     **model_kwargs
                 )
             else:
+                # Modelo genérico como fallback
                 model = AutoModel.from_pretrained(**model_kwargs)
             
-            # Move para o dispositivo
-            device = self.get_device()
+            # Move modelo para o dispositivo explicitamente
             model = model.to(device)
             
+            # Verifica se está realmente na GPU
+            if str(device).startswith("cuda"):
+                import torch
+                if next(model.parameters()).device.type != "cuda":
+                    self._logger.warning(
+                        "Modelo não foi movido para GPU corretamente, tentando novamente..."
+                    )
+                    model = model.to(device)
+                    # Verifica novamente
+                    if next(model.parameters()).device.type == "cuda":
+                        self._logger.info("Modelo agora está na GPU")
+                    else:
+                        self._logger.error("Falha ao mover modelo para GPU!")
+            
             self._model = model
+            
+            # Log detalhado sobre o device
+            actual_device = next(model.parameters()).device
             self._logger.info(
                 "Modelo carregado com sucesso",
                 model_name=config.name,
-                device=str(device)
+                task=config.task,
+                target_device=str(device),
+                actual_device=str(actual_device),
+                on_gpu=(actual_device.type == "cuda")
             )
             
             return model
@@ -135,6 +169,80 @@ class HuggingFaceBackend(BackendBase):
                 f"Falha ao carregar modelo '{config.name}': {e}",
                 backend_type="huggingface",
                 operation="load_model",
+                original_exception=e
+            )
+    
+    def apply_lora(
+        self,
+        model: Any,
+        lora_config: LoRAConfig
+    ) -> Any:
+        """
+        Aplica LoRA (Low-Rank Adaptation) ao modelo.
+        
+        Args:
+            model: Modelo a ser modificado
+            lora_config: Configuração de LoRA
+            
+        Returns:
+            Modelo com LoRA aplicado
+        """
+        if not lora_config.enabled:
+            return model
+        
+        try:
+            from peft import LoraConfig, get_peft_model, TaskType
+            
+            self._logger.info(
+                "Aplicando LoRA ao modelo",
+                r=lora_config.r,
+                alpha=lora_config.lora_alpha,
+                dropout=lora_config.lora_dropout
+            )
+            
+            # Determina o task_type
+            task_type_str = lora_config.task_type
+            if task_type_str == "CAUSAL_LM" or task_type_str is None:
+                task_type = TaskType.CAUSAL_LM
+            elif task_type_str == "SEQ_2_SEQ_LM":
+                task_type = TaskType.SEQ_2_SEQ_LM
+            else:
+                task_type = TaskType.CAUSAL_LM  # Default
+                self._logger.warning(
+                    f"Task type '{task_type_str}' não reconhecido, usando CAUSAL_LM"
+                )
+            
+            # Cria configuração LoRA
+            peft_config = LoraConfig(
+                r=lora_config.r,
+                lora_alpha=lora_config.lora_alpha,
+                target_modules=lora_config.target_modules,
+                lora_dropout=lora_config.lora_dropout,
+                bias=lora_config.bias,
+                task_type=task_type,
+            )
+            
+            # Aplica LoRA ao modelo
+            model = get_peft_model(model, peft_config)
+            
+            self._logger.info("LoRA aplicado com sucesso")
+            
+            # Imprime estatísticas do modelo
+            model.print_trainable_parameters()
+            
+            return model
+            
+        except ImportError:
+            raise BackendError(
+                "Biblioteca 'peft' não encontrada. Instale com: pip install peft",
+                backend_type="huggingface",
+                operation="apply_lora"
+            )
+        except Exception as e:
+            raise BackendError(
+                f"Falha ao aplicar LoRA: {e}",
+                backend_type="huggingface",
+                operation="apply_lora",
                 original_exception=e
             )
     
@@ -323,6 +431,9 @@ class HuggingFaceBackend(BackendBase):
         
         self._logger.info("Criando Trainer")
         
+        # Obtém device para garantir uso de GPU
+        device = self.get_device()
+        
         # Configura TrainingArguments
         training_args = TrainingArguments(
             output_dir=output_dir,
@@ -339,12 +450,22 @@ class HuggingFaceBackend(BackendBase):
             bf16=training_config.bf16,
             max_grad_norm=training_config.max_grad_norm,
             seed=training_config.seed,
+            gradient_checkpointing=training_config.gradient_checkpointing,
             logging_dir=f"{output_dir}/logs",
             logging_steps=100,
             eval_strategy="epoch" if eval_dataset is not None else "no",
             save_strategy="epoch",
             load_best_model_at_end=eval_dataset is not None,
             report_to="none",  # Desabilita integração com wandb por padrão
+        )
+        
+        # Log sobre device usado no treinamento
+        self._logger.info(
+            "TrainingArguments criado",
+            device=str(device),
+            fp16=training_config.fp16,
+            bf16=training_config.bf16,
+            gradient_checkpointing=training_config.gradient_checkpointing
         )
         
         self._training_args = training_args
@@ -564,14 +685,24 @@ class HuggingFaceBackend(BackendBase):
         if self._device is None:
             import torch
             
+            # Verifica CUDA disponível e funcional
             if torch.cuda.is_available():
                 self._device = torch.device("cuda")
+                self._logger.info(
+                    "Dispositivo CUDA detectado",
+                    device=str(self._device),
+                    gpu_count=torch.cuda.device_count(),
+                    gpu_name=torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "unknown"
+                )
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 self._device = torch.device("mps")
+                self._logger.info("Dispositivo MPS detectado", device=str(self._device))
             else:
                 self._device = torch.device("cpu")
-            
-            self._logger.info("Dispositivo detectado", device=str(self._device))
+                self._logger.warning(
+                    "Nenhuma GPU detectada, usando CPU",
+                    device=str(self._device)
+                )
         
         return self._device
     

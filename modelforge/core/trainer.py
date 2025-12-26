@@ -189,6 +189,30 @@ class ModelTrainer:
             # Carrega modelo
             self._model = self._backend.load_model(self._config.model)
             
+            # Aplica LoRA se configurado
+            if self._config.lora and self._config.lora.enabled:
+                self._model = self._backend.apply_lora(
+                    self._model,
+                    self._config.lora
+                )
+                # Garante que o modelo com LoRA está na GPU
+                device = self._infrastructure.get_device()
+                if str(device).startswith("cuda"):
+                    self._model = self._model.to(device)
+                    import torch
+                    if next(self._model.parameters()).device.type == "cuda":
+                        self._logger.info("Modelo com LoRA está na GPU")
+            
+            # Aplica gradient checkpointing se configurado
+            if self._config.training.gradient_checkpointing:
+                if hasattr(self._model, "gradient_checkpointing_enable"):
+                    self._model.gradient_checkpointing_enable()
+                    self._logger.info("Gradient checkpointing ativado")
+                else:
+                    self._logger.warning(
+                        "Modelo não suporta gradient checkpointing"
+                    )
+            
             # Carrega dataset
             dataset = self._backend.load_dataset(self._config.dataset)
             

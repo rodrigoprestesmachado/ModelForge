@@ -97,13 +97,36 @@ modelforge validate config.yaml
 modelforge train config.yaml
 ```
 
-### 6. Exportar para Docker
+### 6. Testar o modelo
+
+Antes de fazer o deploy, teste a qualidade das respostas do modelo:
+
+```bash
+# Testar com prompt simples
+modelforge test config.yaml --prompt "Explique o que é inteligência artificial"
+
+# Testar com configurações avançadas
+modelforge test config.yaml --prompt "Continue a história:" --max-tokens 150 --temperature 0.8
+```
+
+**Opções disponíveis:**
+
+| Opção | Descrição |
+|-------|-----------|
+| `--prompt` / `-p` | Texto de entrada para o modelo (obrigatório) |
+| `--model-path` / `-m` | Caminho direto do modelo (opcional, usa config se não fornecido) |
+| `--max-tokens` | Número máximo de tokens a gerar (padrão: 100) |
+| `--temperature` | Temperatura de sampling, 0 = determinístico (padrão: 1.0) |
+
+O comando suporta tanto modelos de **geração de texto** (exibe o texto gerado) quanto modelos de **classificação** (exibe a classe predita e probabilidades).
+
+### 7. Exportar para Docker
 
 ```bash
 modelforge deploy config.yaml
 ```
 
-### 7. Executar API
+### 8. Executar API
 
 ```bash
 docker run -p 8000:8000 modelforge-model:latest
@@ -116,6 +139,7 @@ docker run -p 8000:8000 modelforge-model:latest
 | `modelforge init [nome]` | Cria novo projeto |
 | `modelforge validate [config]` | Valida arquivo YAML |
 | `modelforge train [config]` | Executa fine-tuning |
+| `modelforge test [config]` | Testa modelo com prompt |
 | `modelforge status` | Exibe status/checkpoints |
 | `modelforge export [config]` | Exporta modelo |
 | `modelforge deploy [config]` | Gera Docker image |
@@ -132,6 +156,15 @@ modelforge validate config.yaml --verbose
 
 # Treinar resumindo de checkpoint
 modelforge train config.yaml --resume ./checkpoints/checkpoint-epoch-2
+
+# Testar modelo antes do deploy
+modelforge test config.yaml --prompt "Explique machine learning"
+
+# Testar modelo diretamente por caminho
+modelforge test --model-path ./checkpoints/final_model --prompt "Hello world"
+
+# Testar com opções customizadas
+modelforge test config.yaml --prompt "Continue:" --max-tokens 200 --temperature 0.7
 
 # Exportar como API standalone
 modelforge export config.yaml --format api --output ./deploy

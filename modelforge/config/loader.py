@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional, Union
 import yaml
 from pydantic import ValidationError
 
-from modelforge.config.schema import Config
+from modelforge.config.schema import Config, LoRAConfig
 from modelforge.utils.exceptions import ConfigValidationError
 
 

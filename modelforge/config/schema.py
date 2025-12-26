@@ -178,6 +178,42 @@ class DatasetConfig(BaseModel):
         return v.strip()
 
 
+class LoRAConfig(BaseModel):
+    """
+    Configuração de LoRA (Low-Rank Adaptation) para fine-tuning eficiente.
+    
+    Attributes:
+        enabled: Se LoRA está ativado
+        r: Rank da adaptação LoRA
+        lora_alpha: Alpha para scaling LoRA
+        lora_dropout: Dropout para LoRA
+        bias: Tipo de bias (none, all, lora_only)
+        task_type: Tipo de tarefa (CAUSAL_LM, SEQ_2_SEQ_LM, etc.)
+        target_modules: Módulos alvo (None = auto-detect)
+    """
+    enabled: bool = Field(default=False, description="Ativar LoRA")
+    r: int = Field(default=16, ge=1, description="Rank LoRA")
+    lora_alpha: int = Field(default=32, ge=1, description="Alpha LoRA")
+    lora_dropout: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Dropout LoRA"
+    )
+    bias: str = Field(
+        default="none",
+        description="Tipo de bias (none, all, lora_only)"
+    )
+    task_type: Optional[str] = Field(
+        default=None,
+        description="Tipo de tarefa (CAUSAL_LM, SEQ_2_SEQ_LM, etc.)"
+    )
+    target_modules: Optional[List[str]] = Field(
+        default=None,
+        description="Módulos alvo para LoRA (None = auto-detect)"
+    )
+
+
 class TrainingConfig(BaseModel):
     """
     Configuração de parâmetros de treinamento.
@@ -194,6 +230,7 @@ class TrainingConfig(BaseModel):
         bf16: Usar precisão mista BF16
         max_grad_norm: Norma máxima de gradiente
         seed: Seed para reprodutibilidade
+        gradient_checkpointing: Usar gradient checkpointing para economia de memória
     """
     batch_size: int = Field(default=16, ge=1, description="Tamanho do batch")
     learning_rate: float = Field(
@@ -231,6 +268,10 @@ class TrainingConfig(BaseModel):
         description="Norma máxima de gradiente"
     )
     seed: int = Field(default=42, description="Seed para reprodutibilidade")
+    gradient_checkpointing: bool = Field(
+        default=False,
+        description="Usar gradient checkpointing para economia de memória"
+    )
     
     @model_validator(mode="after")
     def validate_precision(self) -> "TrainingConfig":
@@ -487,6 +528,10 @@ class Config(BaseModel):
     logging: LoggingConfig = Field(
         default_factory=LoggingConfig,
         description="Configuração de logging"
+    )
+    lora: Optional[LoRAConfig] = Field(
+        default=None,
+        description="Configuração de LoRA para fine-tuning eficiente"
     )
 
     class Config:

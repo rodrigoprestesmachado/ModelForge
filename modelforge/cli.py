@@ -454,6 +454,123 @@ def deploy(config_path: str, model_path: Optional[str], build_only: bool, push: 
 
 
 @cli.command()
+@click.argument("config_path", type=click.Path(exists=True), required=False)
+@click.option("--model-path", "-m", type=click.Path(), help="Caminho direto do modelo")
+@click.option("--prompt", "-p", type=str, required=True, help="Prompt para testar o modelo")
+@click.option("--max-tokens", type=int, default=100, help="Número máximo de tokens a gerar")
+@click.option("--temperature", type=float, default=1.0, help="Temperatura de sampling (0 = determinístico)")
+def test(
+    config_path: Optional[str],
+    model_path: Optional[str],
+    prompt: str,
+    max_tokens: int,
+    temperature: float
+):
+    """
+    Testa o modelo com um prompt antes do deploy.
+    
+    Carrega o modelo treinado e executa inferência com o prompt fornecido,
+    permitindo validar a qualidade das respostas antes de criar o container.
+    
+    Exemplo:
+        modelforge test config.yaml --prompt "Explique machine learning"
+        modelforge test --model-path ./checkpoints/final_model --prompt "Hello"
+        modelforge test config.yaml --prompt "Continue:" --max-tokens 200 --temperature 0.7
+    """
+    from modelforge.core.inference import ModelInference, InferenceError
+    
+    cli_instance.print_banner()
+    console.print(f"\n[bold]Testando modelo...[/bold]\n")
+    
+    try:
+        # Determina caminho do modelo
+        if model_path is None:
+            if config_path is None:
+                console.print("[bold red]✗ Erro:[/bold red] Forneça config_path ou --model-path")
+                sys.exit(1)
+            
+            # Carrega configuração para obter caminho do modelo
+            from modelforge.config.loader import ConfigLoader
+            loader = ConfigLoader()
+            config = loader.load(config_path)
+            model_path = str(Path(config.checkpoints.save_dir) / "final_model")
+            console.print(f"[dim]Config:[/dim] {config_path}")
+        
+        if not Path(model_path).exists():
+            console.print(f"[bold red]✗ Modelo não encontrado:[/bold red] {model_path}")
+            console.print("[dim]Execute o treinamento primeiro ou especifique --model-path[/dim]")
+            sys.exit(1)
+        
+        console.print(f"[dim]Modelo:[/dim] {model_path}")
+        console.print(f"[dim]Max tokens:[/dim] {max_tokens}")
+        console.print(f"[dim]Temperature:[/dim] {temperature}")
+        console.print()
+        
+        # Carrega modelo e executa inferência
+        with console.status("[bold green]Carregando modelo..."):
+            inference = ModelInference(model_path)
+            inference.load()
+        
+        console.print(f"[bold green]✓[/bold green] Modelo carregado!")
+        console.print(f"[dim]Tipo:[/dim] {'Generativo' if inference._is_generative else 'Classificação'}")
+        console.print()
+        
+        # Exibe prompt
+        console.print(Panel(prompt, title="[bold cyan]Prompt[/bold cyan]", border_style="cyan"))
+        
+        # Executa inferência
+        with console.status("[bold green]Gerando resposta..."):
+            result = inference.generate(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+        
+        # Exibe resultado baseado no tipo
+        if result["type"] == "generation":
+            console.print(Panel(
+                result["response"] or "[dim](resposta vazia)[/dim]",
+                title="[bold green]Resposta[/bold green]",
+                border_style="green"
+            ))
+            console.print(f"\n[dim]Tokens gerados:[/dim] {result['tokens_generated']}")
+            
+        else:  # classificação
+            console.print(Panel(
+                f"[bold]{result['predicted_label']}[/bold]\n\n"
+                f"Confiança: {result['confidence']:.2%}",
+                title="[bold green]Classificação[/bold green]",
+                border_style="green"
+            ))
+            
+            # Exibe probabilidades em tabela
+            if result.get("probabilities"):
+                table = Table(title="Probabilidades por Classe")
+                table.add_column("Classe", style="cyan")
+                table.add_column("Probabilidade", style="white")
+                
+                for label, prob in sorted(
+                    result["probabilities"].items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                ):
+                    bar = "█" * int(prob * 20)
+                    table.add_row(label, f"{prob:.2%} {bar}")
+                
+                console.print(table)
+        
+        # Limpa recursos
+        inference.cleanup()
+        
+    except InferenceError as e:
+        console.print(f"\n[bold red]✗ Erro de inferência:[/bold red] {e}")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n[bold red]✗ Erro:[/bold red] {e}")
+        sys.exit(1)
+
+
+@cli.command()
 @click.argument("model_path", type=click.Path(exists=True))
 @click.option("--port", "-p", type=int, default=8000, help="Porta da API")
 @click.option("--host", "-h", type=str, default="0.0.0.0", help="Host da API")
