@@ -195,13 +195,25 @@ class ModelTrainer:
                     self._model,
                     self._config.lora
                 )
-                # Garante que o modelo com LoRA está na GPU
+                # Verifica se o modelo com LoRA está na GPU
+                # Quando usando device_map, o modelo já está no device correto
                 device = self._infrastructure.get_device()
                 if str(device).startswith("cuda"):
-                    self._model = self._model.to(device)
                     import torch
-                    if next(self._model.parameters()).device.type == "cuda":
-                        self._logger.info("Modelo com LoRA está na GPU")
+                    # Verifica se já está usando device_map (não deve mover novamente)
+                    if not hasattr(self._model, "hf_device_map"):
+                        # Só tenta mover se não estiver usando device_map
+                        try:
+                            actual_device = next(self._model.parameters()).device
+                            if actual_device.type != "cuda":
+                                self._logger.info("Movendo modelo com LoRA para GPU")
+                                self._model = self._model.to(device)
+                            else:
+                                self._logger.info("Modelo com LoRA já está na GPU")
+                        except StopIteration:
+                            self._logger.warning("Não foi possível verificar device do modelo com LoRA")
+                    else:
+                        self._logger.info("Modelo com LoRA usando device_map (já está no device correto)")
             
             # Aplica gradient checkpointing se configurado
             if self._config.training.gradient_checkpointing:

@@ -116,6 +116,25 @@ class HuggingFaceBackend(BackendBase):
             
             # Obtém dispositivo - sempre move explicitamente para garantir uso de GPU
             device = self.get_device()
+            import torch
+            
+            # Configura device_map para carregar diretamente na GPU quando disponível
+            # Isso evita carregar na CPU primeiro e depois mover, economizando memória
+            use_device_map = False
+            if str(device).startswith("cuda") and torch.cuda.is_available():
+                # Carrega diretamente na GPU usando device_map
+                # Isso é mais eficiente que carregar na CPU e depois mover
+                model_kwargs["device_map"] = "auto"
+                model_kwargs["low_cpu_mem_usage"] = True
+                use_device_map = True
+                self._logger.info(
+                    "Carregando modelo diretamente na GPU usando device_map",
+                    device_map="auto"
+                )
+            else:
+                # CPU ou MPS - não usa device_map
+                model_kwargs["low_cpu_mem_usage"] = True
+                self._logger.info("Carregando modelo na CPU/MPS")
             
             # Seleciona a classe de modelo baseado na tarefa
             if config.task == "text-generation" or config.task == "causal-lm":
@@ -132,35 +151,72 @@ class HuggingFaceBackend(BackendBase):
                 # Modelo genérico como fallback
                 model = AutoModel.from_pretrained(**model_kwargs)
             
-            # Move modelo para o dispositivo explicitamente
-            model = model.to(device)
+            # Se não usou device_map, move para o dispositivo explicitamente
+            if not use_device_map:
+                model = model.to(device)
             
-            # Verifica se está realmente na GPU
+            # Verifica se está realmente na GPU (quando usando device_map, verifica de forma diferente)
             if str(device).startswith("cuda"):
-                import torch
-                if next(model.parameters()).device.type != "cuda":
-                    self._logger.warning(
-                        "Modelo não foi movido para GPU corretamente, tentando novamente..."
-                    )
-                    model = model.to(device)
-                    # Verifica novamente
-                    if next(model.parameters()).device.type == "cuda":
-                        self._logger.info("Modelo agora está na GPU")
-                    else:
-                        self._logger.error("Falha ao mover modelo para GPU!")
+                if use_device_map:
+                    # Quando usando device_map, verifica através do hf_device_map
+                    if hasattr(model, "hf_device_map"):
+                        device_map_info = model.hf_device_map
+                        self._logger.info(
+                            "Modelo carregado com device_map",
+                            device_map=str(device_map_info)[:200]  # Primeiros 200 chars
+                        )
+                    # Tenta verificar através dos parâmetros
+                    try:
+                        sample_param = next(model.parameters())
+                        actual_device = sample_param.device
+                        if actual_device.type == "cuda":
+                            self._logger.info(
+                                "Modelo está na GPU (device_map)",
+                                device=str(actual_device)
+                            )
+                    except StopIteration:
+                        # Modelo sem parâmetros? Improvável mas possível
+                        self._logger.warning("Não foi possível verificar device do modelo")
+                else:
+                    # Verificação normal para modelos sem device_map
+                    actual_device = next(model.parameters()).device
+                    if actual_device.type != "cuda":
+                        self._logger.warning(
+                            "Modelo não está na GPU, tentando mover novamente..."
+                        )
+                        model = model.to(device)
+                        actual_device = next(model.parameters()).device
+                        if actual_device.type == "cuda":
+                            self._logger.info("Modelo agora está na GPU")
+                        else:
+                            self._logger.error(
+                                "Falha ao mover modelo para GPU!",
+                                actual_device=str(actual_device)
+                            )
             
             self._model = model
             
             # Log detalhado sobre o device
-            actual_device = next(model.parameters()).device
-            self._logger.info(
-                "Modelo carregado com sucesso",
-                model_name=config.name,
-                task=config.task,
-                target_device=str(device),
-                actual_device=str(actual_device),
-                on_gpu=(actual_device.type == "cuda")
-            )
+            try:
+                actual_device = next(model.parameters()).device
+                self._logger.info(
+                    "Modelo carregado com sucesso",
+                    model_name=config.name,
+                    task=config.task,
+                    target_device=str(device),
+                    actual_device=str(actual_device),
+                    on_gpu=(actual_device.type == "cuda"),
+                    used_device_map=use_device_map
+                )
+            except StopIteration:
+                # Modelo sem parâmetros (improvável)
+                self._logger.info(
+                    "Modelo carregado com sucesso",
+                    model_name=config.name,
+                    task=config.task,
+                    target_device=str(device),
+                    used_device_map=use_device_map
+                )
             
             return model
             
