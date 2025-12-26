@@ -168,8 +168,6 @@ secrets/
 *.key
 *.pem
 
-
 modelforge.egg-info/
-ModeForgeMachine/
+ModelForgeMachine/
 modelforge/mymodel/
-
