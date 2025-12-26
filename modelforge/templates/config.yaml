@@ -1,0 +1,252 @@
+# ModelForge - Arquivo de Configuração
+# Este arquivo define todas as configurações para fine-tuning de modelos ML
+
+# ============================================================================
+# CONFIGURAÇÃO DO MODELO
+# ============================================================================
+model:
+  # Nome do modelo no Hugging Face Hub ou caminho local
+  name: "bert-base-uncased"
+  
+  # Versão do modelo (latest, v1.0, etc.)
+  version: "latest"
+  
+  # Repositório de origem (huggingface, local, custom)
+  repository: "huggingface"
+  
+  # Tipo do modelo (transformer, cnn, etc.)
+  type: "transformer"
+  
+  # Framework de deep learning (pytorch, tensorflow)
+  framework: "pytorch"
+  
+  # Tarefa do modelo (text-classification, token-classification, etc.)
+  task: "text-classification"
+  
+  # Número de labels para classificação (opcional)
+  num_labels: 2
+  
+  # Revisão específica do modelo no Hub (opcional)
+  # revision: "main"
+
+# ============================================================================
+# CONFIGURAÇÃO DO DATASET
+# ============================================================================
+dataset:
+  # Nome do dataset no Hugging Face Hub ou caminho local
+  name: "imdb"
+  
+  # Repositório de origem
+  repository: "huggingface"
+  
+  # Subset específico do dataset (opcional)
+  # subset: "default"
+  
+  # Configuração de splits
+  splits:
+    train: "train"
+    validation: "test"  # ou "validation" dependendo do dataset
+    # test: "test"  # opcional
+  
+  # Mapeamento de colunas
+  columns:
+    text: "text"
+    label: "label"
+    # text_pair: "text2"  # para tarefas de pares de texto
+  
+  # Configurações de pré-processamento
+  preprocessing:
+    max_length: 512
+    truncation: true
+    padding: "max_length"
+    return_tensors: "pt"
+  
+  # Usar streaming para datasets grandes
+  streaming: false
+
+# ============================================================================
+# CONFIGURAÇÃO DE TREINAMENTO
+# ============================================================================
+training:
+  # Tamanho do batch por dispositivo
+  batch_size: 16
+  
+  # Taxa de aprendizado
+  learning_rate: 2.0e-5
+  
+  # Número de épocas
+  epochs: 3
+  
+  # Tipo de scheduler de learning rate
+  # Opções: linear, cosine, constant, polynomial, cosine_with_restarts
+  scheduler: "linear"
+  
+  # Passos de warmup (absoluto)
+  warmup_steps: 500
+  
+  # Ratio de warmup (alternativa a warmup_steps)
+  warmup_ratio: 0.0
+  
+  # Weight decay para regularização
+  weight_decay: 0.01
+  
+  # Passos de acumulação de gradiente
+  gradient_accumulation_steps: 1
+  
+  # Precisão mista FP16 (requer GPU compatível)
+  fp16: false
+  
+  # Precisão mista BF16 (requer GPU Ampere ou superior)
+  bf16: false
+  
+  # Norma máxima de gradiente (gradient clipping)
+  max_grad_norm: 1.0
+  
+  # Seed para reprodutibilidade
+  seed: 42
+
+# ============================================================================
+# CONFIGURAÇÃO DE AVALIAÇÃO
+# ============================================================================
+evaluation:
+  # Métricas a calcular
+  metrics:
+    - "accuracy"
+    - "f1"
+    # - "precision"
+    # - "recall"
+  
+  # Estratégia de salvamento (epoch, steps, no)
+  save_strategy: "epoch"
+  
+  # Passos entre avaliações (se save_strategy=steps)
+  # eval_steps: 500
+  
+  # Carregar melhor modelo ao final do treinamento
+  load_best_model_at_end: true
+  
+  # Métrica para selecionar melhor modelo
+  metric_for_best_model: "eval_loss"
+  
+  # Se maior valor é melhor para a métrica
+  greater_is_better: false
+
+# ============================================================================
+# CONFIGURAÇÃO DE CHECKPOINTS
+# ============================================================================
+checkpoints:
+  # Diretório para salvar checkpoints
+  save_dir: "./checkpoints"
+  
+  # Passos entre salvamentos (se diferente de save_strategy)
+  # save_steps: 500
+  
+  # Número máximo de checkpoints a manter
+  max_to_keep: 3
+  
+  # Limite total de checkpoints
+  # save_total_limit: 5
+
+# ============================================================================
+# CONFIGURAÇÃO DE VERSIONAMENTO
+# ============================================================================
+versioning:
+  # Nome do modelo no Hub (username/model-name)
+  hub_name: "my-username/my-fine-tuned-model"
+  
+  # Fazer push automático para o Hub
+  push_to_hub: false
+  
+  # Modelo privado no Hub
+  private: false
+  
+  # Estratégia de push (every_save, end, checkpoint)
+  hub_strategy: "every_save"
+
+# ============================================================================
+# CONFIGURAÇÃO DE INFRAESTRUTURA
+# ============================================================================
+infrastructure:
+  # Tipo de infraestrutura (local, colab, cloud, container)
+  type: "local"
+  
+  # Configuração de recursos
+  resources:
+    # Usar GPU
+    gpu: true
+    
+    # Número de GPUs
+    gpu_count: 1
+    
+    # Número de CPUs (opcional)
+    # cpu_count: 4
+    
+    # Memória em GB (opcional)
+    # memory_gb: 16
+  
+  # Provedor cloud (aws, gcp, azure) - apenas para type: cloud
+  # provider: "aws"
+
+# ============================================================================
+# CONFIGURAÇÃO DE CREDENCIAIS
+# ============================================================================
+# Use variáveis de ambiente para segurança: ${VAR_NAME}
+credentials:
+  # Token do Hugging Face Hub
+  huggingface_token: "${HF_TOKEN}"
+  
+  # Chave da API do Weights & Biases (opcional)
+  # wandb_api_key: "${WANDB_API_KEY}"
+  
+  # Credenciais adicionais
+  # additional:
+  #   CUSTOM_KEY: "${CUSTOM_KEY}"
+
+# ============================================================================
+# CONFIGURAÇÃO DE EXPORTAÇÃO
+# ============================================================================
+export:
+  # Formato de exportação (docker, onnx, etc.)
+  format: "docker"
+  
+  # Diretório de saída
+  output_dir: "./output"
+  
+  # Configuração da API
+  api:
+    # Framework da API
+    framework: "flask"
+    
+    # Endpoints a expor
+    endpoints:
+      - "chat/completions"
+      - "completions"
+    
+    # Porta da API
+    port: 8000
+    
+    # Host da API
+    host: "0.0.0.0"
+  
+  # Nome da imagem Docker (opcional)
+  image_name: "my-model-api"
+  
+  # Tag da imagem
+  image_tag: "latest"
+  
+  # Registry para push (opcional)
+  # registry: "docker.io/myusername"
+
+# ============================================================================
+# CONFIGURAÇÃO DE LOGGING
+# ============================================================================
+logging:
+  # Nível de log (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  level: "INFO"
+  
+  # Formato de log (json, text)
+  format: "json"
+  
+  # Arquivo de log (opcional)
+  # file: "./logs/training.log"
+

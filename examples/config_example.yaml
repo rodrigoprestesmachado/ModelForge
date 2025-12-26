@@ -1,0 +1,60 @@
+# Exemplo: Fine-tuning de BERT para classificação de sentimentos
+# Dataset: IMDB Movie Reviews
+
+model:
+  name: "bert-base-uncased"
+  repository: "huggingface"
+  framework: "pytorch"
+  task: "text-classification"
+  num_labels: 2
+
+dataset:
+  name: "imdb"
+  repository: "huggingface"
+  splits:
+    train: "train"
+    validation: "test"
+  columns:
+    text: "text"
+    label: "label"
+  preprocessing:
+    max_length: 256
+
+training:
+  batch_size: 16
+  learning_rate: 2.0e-5
+  epochs: 3
+  scheduler: "linear"
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  fp16: true
+
+evaluation:
+  metrics:
+    - "accuracy"
+    - "f1"
+  save_strategy: "epoch"
+  load_best_model_at_end: true
+
+checkpoints:
+  save_dir: "./checkpoints"
+  max_to_keep: 2
+
+infrastructure:
+  type: "local"
+  resources:
+    gpu: true
+    gpu_count: 1
+
+credentials:
+  huggingface_token: "${HF_TOKEN}"
+
+export:
+  format: "docker"
+  output_dir: "./output"
+  api:
+    port: 8000
+    endpoints:
+      - "chat/completions"
+      - "completions"
+

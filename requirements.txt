@@ -1,0 +1,48 @@
+# ModelForge - Sistema de Fine-tuning de Modelos ML
+# Dependências principais
+
+# Hugging Face
+transformers>=4.36.0
+datasets>=2.16.0
+accelerate>=0.25.0
+huggingface-hub>=0.20.0
+
+# PyTorch
+torch>=2.1.0
+
+# CLI
+click>=8.1.0
+rich>=13.7.0
+
+# Configuração e Validação
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# API Flask
+flask>=3.0.0
+gunicorn>=21.2.0
+
+# Docker
+docker>=7.0.0
+
+# Logging e Monitoramento
+structlog>=24.1.0
+
+# Métricas e Avaliação
+scikit-learn>=1.3.0
+numpy>=1.26.0
+evaluate>=0.4.0
+
+# Utilitários
+tqdm>=4.66.0
+requests>=2.31.0
+
+# Desenvolvimento (opcional)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=24.1.0
+isort>=5.13.0
+mypy>=1.8.0
+
